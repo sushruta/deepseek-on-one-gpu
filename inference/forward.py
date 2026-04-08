@@ -1,4 +1,5 @@
 import torch
+from tqdm import tqdm
 
 from .config import DeepSeekConfig
 from .gpu_transfer import GPUTransfer
@@ -36,12 +37,23 @@ def forward_pass(
     # Embed
     embed_weight = weight_store.get("model.embed_tokens.weight")
     hidden = torch.nn.functional.embedding(input_ids, embed_weight)  # (B, S, hidden_size)
+    is_prefill = position == 0
     if verbose:
         print(f"  [forward] Embedded input: {list(hidden.shape)} (pos={position})")
 
-    for layer_idx in range(config.num_layers):
+    layer_iter = tqdm(
+        range(config.num_layers),
+        desc="prefill layers" if is_prefill else None,
+        unit="layer",
+        disable=not (verbose and is_prefill),
+        dynamic_ncols=True,
+        leave=False,
+    )
+    for layer_idx in layer_iter:
         layer_type = "dense" if layer_idx < config.first_k_dense_replace else "moe"
-        if verbose:
+        if verbose and is_prefill:
+            layer_iter.set_postfix(type=layer_type)
+        elif verbose:
             print(f"  [forward] Layer {layer_idx:02d}/{config.num_layers - 1} [{layer_type}]")
         hidden = transformer_layer(
             hidden, layer_idx, kv_caches[layer_idx], position,

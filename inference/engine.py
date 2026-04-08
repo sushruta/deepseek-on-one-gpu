@@ -1,7 +1,10 @@
+import time
 from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer
+
+from tqdm import tqdm
 
 from .config import DeepSeekConfig, load_config
 from .forward import forward_pass
@@ -23,6 +26,7 @@ class InferenceEngine:
     ):
         self.device = torch.device(device)
         self.verbose = verbose
+        _t0 = time.perf_counter()
 
         if verbose:
             print(f"[init] Loading config from {model_path}")
@@ -63,7 +67,7 @@ class InferenceEngine:
                   f"(kv_lora_rank={self.config.kv_lora_rank}, rope_dim={self.config.qk_rope_head_dim})")
         self.kv_caches = self._init_kv_caches()
         if verbose:
-            print("[init] Engine ready.")
+            print(f"[init] Engine ready. ({time.perf_counter() - _t0:.1f}s total)")
 
     def _init_kv_caches(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Allocate KV caches for all layers.
@@ -102,21 +106,33 @@ class InferenceEngine:
         # Prefill: process entire prompt
         if self.verbose:
             print(f"[generate] Prefill: running forward pass over {seq_len} prompt tokens ...")
+        t_prefill = time.perf_counter()
         logits = forward_pass(
             input_ids, self.kv_caches, 0,
             self.weight_store, self.gpu_transfer, self.config, self.rope_freqs,
             verbose=self.verbose,
         )
+        prefill_s = time.perf_counter() - t_prefill
         next_token = sample(logits[:, -1, :], temperature, top_p)
         generated = [next_token.item()]
         if self.verbose:
             first_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
-            print(f"[generate] Prefill done. First token: {next_token.item()!r} ({first_text!r})")
+            print(f"[generate] Prefill done in {prefill_s:.2f}s "
+                  f"({seq_len / prefill_s:.1f} tok/s). "
+                  f"First token: {next_token.item()!r} ({first_text!r})")
 
         # Decode: one token at a time
         if self.verbose:
             print(f"[generate] Decode: generating up to {max_tokens - 1} more tokens ...")
-        for step in range(max_tokens - 1):
+        t_decode = time.perf_counter()
+        decode_bar = tqdm(
+            range(max_tokens - 1),
+            desc="decoding",
+            unit="tok",
+            disable=not self.verbose,
+            dynamic_ncols=True,
+        )
+        for step in decode_bar:
             position = seq_len + step
             logits = forward_pass(
                 next_token.unsqueeze(0), self.kv_caches, position,
@@ -127,17 +143,23 @@ class InferenceEngine:
 
             if next_token.item() == self.tokenizer.eos_token_id:
                 if self.verbose:
-                    print(f"[generate] EOS token hit at step {step + 1}. Stopping.")
+                    decode_bar.write(f"[generate] EOS at step {step + 1}")
                 break
 
             generated.append(next_token.item())
             if self.verbose:
+                elapsed = time.perf_counter() - t_decode
                 tok_text = self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
-                print(f"[generate] step {step + 1}/{max_tokens - 1}: token {next_token.item()!r} ({tok_text!r}), "
-                      f"total generated={len(generated)}")
+                decode_bar.set_postfix(
+                    tok=repr(tok_text),
+                    total=len(generated),
+                    tok_s=f"{len(generated) / elapsed:.1f}",
+                )
 
         if self.verbose:
-            print(f"[generate] Done. Generated {len(generated)} tokens total.")
+            decode_s = time.perf_counter() - t_decode
+            print(f"[generate] Done. {len(generated)} tokens in {decode_s:.2f}s "
+                  f"({len(generated) / decode_s:.1f} tok/s)")
         return self.tokenizer.decode(generated, skip_special_tokens=True)
 
 

@@ -1,10 +1,12 @@
 import json
 import re
+import time
 from collections import OrderedDict
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
+from tqdm import tqdm
 
 from .config import DeepSeekConfig
 
@@ -130,14 +132,21 @@ class WeightStore:
                   f"{len(non_expert_keys_by_shard)} shards; {n_expert_keys} expert keys (lazy)")
 
         # Load non-expert weights to GPU, one shard at a time (streams through RAM)
-        for shard_idx, (shard_file, keys) in enumerate(non_expert_keys_by_shard.items()):
-            if self.verbose:
-                print(f"[weight_store] Loading shard {shard_idx + 1}/{len(non_expert_keys_by_shard)}: "
-                      f"{shard_file} ({len(keys)} tensors) -> {self.device}")
+        t0 = time.perf_counter()
+        shard_items = list(non_expert_keys_by_shard.items())
+        for shard_file, keys in tqdm(
+            shard_items,
+            desc="loading shards",
+            unit="shard",
+            disable=not self.verbose,
+            dynamic_ncols=True,
+        ):
             shard_path = self.model_path / shard_file
             with safe_open(str(shard_path), framework="pt", device="cpu") as f:
                 for key in keys:
                     self.gpu_weights[key] = f.get_tensor(key).to(self.device)
+        if self.verbose:
+            print(f"[weight_store] All shards loaded in {time.perf_counter() - t0:.1f}s")
 
     def _load_expert_from_disk(self, layer: int, expert_idx: int) -> dict:
         """Read one expert's tensors from safetensors shards into pinned host RAM.
