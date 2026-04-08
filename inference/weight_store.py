@@ -89,10 +89,12 @@ class WeightStore:
         config: DeepSeekConfig,
         device: torch.device,
         expert_cache_bytes: int = 16 * (1024 ** 3),
+        verbose: bool = False,
     ):
         self.model_path = Path(model_path)
         self.config = config
         self.device = device
+        self.verbose = verbose
 
         # Non-expert weights on GPU: key -> tensor
         self.gpu_weights: dict[str, torch.Tensor] = {}
@@ -108,6 +110,8 @@ class WeightStore:
     def _load(self):
         """Load non-expert weights to GPU; build index for expert weights."""
         index_path = self.model_path / "model.safetensors.index.json"
+        if self.verbose:
+            print(f"[weight_store] Reading index from {index_path}")
         with open(index_path) as f:
             index = json.load(f)
 
@@ -119,8 +123,17 @@ class WeightStore:
             else:
                 non_expert_keys_by_shard.setdefault(shard_file, []).append(key)
 
+        if self.verbose:
+            n_expert_keys = len(self.expert_key_to_shard)
+            n_non_expert = sum(len(v) for v in non_expert_keys_by_shard.values())
+            print(f"[weight_store] Index: {n_non_expert} non-expert keys across "
+                  f"{len(non_expert_keys_by_shard)} shards; {n_expert_keys} expert keys (lazy)")
+
         # Load non-expert weights to GPU, one shard at a time (streams through RAM)
-        for shard_file, keys in non_expert_keys_by_shard.items():
+        for shard_idx, (shard_file, keys) in enumerate(non_expert_keys_by_shard.items()):
+            if self.verbose:
+                print(f"[weight_store] Loading shard {shard_idx + 1}/{len(non_expert_keys_by_shard)}: "
+                      f"{shard_file} ({len(keys)} tensors) -> {self.device}")
             shard_path = self.model_path / shard_file
             with safe_open(str(shard_path), framework="pt", device="cpu") as f:
                 for key in keys:
@@ -167,8 +180,16 @@ class WeightStore:
         """
         cached = self.expert_cache.get(layer, expert_idx)
         if cached is None:
+            if self.verbose:
+                cache_used_gb = self.expert_cache.used / (1024 ** 3)
+                cache_cap_gb = self.expert_cache.capacity / (1024 ** 3)
+                print(f"        [expert_cache] MISS  L{layer:02d}/E{expert_idx:03d} — loading from disk "
+                      f"(cache {cache_used_gb:.1f}/{cache_cap_gb:.1f} GB, "
+                      f"{len(self.expert_cache.entries)} entries)")
             cached = self._load_expert_from_disk(layer, expert_idx)
             self.expert_cache.put(layer, expert_idx, cached)
+        elif self.verbose:
+            print(f"        [expert_cache] HIT   L{layer:02d}/E{expert_idx:03d}")
 
         return {
             proj: (cached[proj]["weight"], cached[proj]["weight_scale_inv"])

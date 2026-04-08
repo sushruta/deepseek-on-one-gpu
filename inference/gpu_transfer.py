@@ -12,10 +12,12 @@ class GPUTransfer:
     experts per layer from pinned host RAM to a reusable GPU buffer.
     """
 
-    def __init__(self, config: DeepSeekConfig, weight_store: WeightStore, device: torch.device):
+    def __init__(self, config: DeepSeekConfig, weight_store: WeightStore, device: torch.device,
+                 verbose: bool = False):
         self.config = config
         self.weight_store = weight_store
         self.device = device
+        self.verbose = verbose
         self.transfer_stream = torch.cuda.Stream(device=device)
 
         # Pre-allocate GPU buffer for 8 experts.
@@ -46,7 +48,7 @@ class GPUTransfer:
         return buffers
 
     def transfer_experts(
-        self, layer: int, expert_indices: torch.Tensor,
+        self, layer: int, expert_indices: torch.Tensor, verbose: bool = False,
     ) -> list[dict[str, tuple[torch.Tensor, torch.Tensor]]]:
         """Pack and transfer selected experts from pinned host RAM to GPU buffers.
 
@@ -57,6 +59,11 @@ class GPUTransfer:
         """
         indices = expert_indices.tolist()
         results = []
+
+        _verbose = verbose or self.verbose
+        if _verbose:
+            print(f"      [gpu_transfer] L{layer:02d}: transferring experts {indices} "
+                  f"({len(indices)} slots) host->GPU via async stream")
 
         with torch.cuda.stream(self.transfer_stream):
             for slot, eidx in enumerate(indices):
@@ -70,6 +77,8 @@ class GPUTransfer:
 
         # Sync to ensure transfers complete before compute
         self.transfer_stream.synchronize()
+        if _verbose:
+            print(f"      [gpu_transfer] L{layer:02d}: transfer sync done")
 
         for slot in range(len(indices)):
             buf = self._expert_gpu_buffers[slot]
