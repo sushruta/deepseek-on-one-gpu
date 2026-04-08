@@ -99,3 +99,5 @@ Here are the top 5 largest cities in the world by population as of 2023:
 
 These figures can vary slightly depending on the definition of city limits versus metropolitan areas. Let me know if you'd like more details!
 ```
+
+**150 tokens in 1364.45s (0.1 tok/s)!!!**
