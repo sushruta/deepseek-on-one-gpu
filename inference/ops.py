@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from .config import DeepSeekConfig
+from .fp8_triton import fp8_linear_triton
 
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -27,21 +28,7 @@ def fp8_linear(
     Block dequant on GPU: for each 128x128 block, multiply FP8 values by
     the corresponding scale_inv entry to recover approximate bfloat16 values.
     """
-    out_features, in_features = weight.shape
-    block = 128
-
-    # Dequantize: expand scale_inv to match weight shape
-    # scale_inv has shape (ceil(O/128), ceil(I/128))
-    n_blocks_out = math.ceil(out_features / block)
-    n_blocks_in = math.ceil(in_features / block)
-
-    # Repeat each scale to cover its 128-element block, then trim
-    # (n_blocks_out, n_blocks_in) -> (out_features, in_features)
-    scale_expanded = scale_inv.repeat_interleave(block, dim=0)[:out_features]
-    scale_expanded = scale_expanded.repeat_interleave(block, dim=1)[:, :in_features]
-
-    w_dequant = weight.float() * scale_expanded
-    return (x.float() @ w_dequant.T).to(out_dtype)
+    return fp8_linear_triton(x, weight, scale_inv, out_dtype)
 
 
 def yarn_get_mscale(scale: float = 1.0, mscale: float = 1.0) -> float:
